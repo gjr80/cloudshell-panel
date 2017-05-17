@@ -1,0 +1,614 @@
+#!/usr/bin/env python
+#
+#
+"""Manipulate the Cloudshell2 LCD.
+
+A Python 2.6+ based script to display selected system details on a Cloudshell2
+LCD. 
+
+Inspired by the Odroid XU4 cloudshell-lcd script by Kyle Lee
+http://bazaar.launchpad.net/~kyle1117/+junk/cloudshell-lcd/view/head:/bin/cloudshell-lcd
+
+
+Compatibility
+
+    This script works on the Cloudshell2 LCD and requires Python 2.6 or later.
+    It has not been tested under Python 3. 
+
+    Development and testing was conducted using Armbian 5.27 Odroid XU4 Debian 
+    Jessie (8.8) image using the mainline kernel (4.9.13).
+
+
+Design
+
+    The script defines a class, CloudshellLcd, that is used to manipulate the 
+    Cloudshell2 LCD. A number of utility functions are used obtain system 
+    information for display on the LCD. A config file, 
+    /etc/cloudshell-panel.conf, is used to set various display properties.
+
+    The script has been designed to run as a service.
+
+
+Pre-requisites
+
+    The following additional python packages are required:
+        -   configobj (python-configobj)
+        -   netifaces (python-netifaces)
+        -   psutil (python-psutil)
+
+
+Configuration
+
+    A number of parameters can be defined in /etc/cloudshell-panel.conf to 
+    determine the information displayed as well as its look and feel.
+
+#
+# This file contains the config setting for the python based cloudshell-panel 
+# script/service
+#
+
+# Device used to write to LCD. String, default is /dev/tty1
+device = /dev/tty1
+
+# Period in seconds between display updates. Values less than 2 can result in 
+# some display instability.
+update_interval = 2
+
+# Format used for display of date-time. Uses python strftime format directives
+# refer https://docs.python.org/2/library/datetime.html. 
+# String, default %-d %B %Y %H:%M:%S
+date_time_format = '%-d %B %Y %H:%M:%S'
+
+
+#
+# Display colour settings
+#
+
+# Colour to be used for labels o the display. String, default is white.
+label_colour = white
+
+# Colour to be used for non-colour coded data. String, default is cyan.
+data_colour = cyan
+
+
+#
+# CPU temperature display settings.
+#
+
+# Many linux variants make CPU (and other) temperature available by reading a
+# file object. The XU4 makes temperature available in 
+# /sys/class/thermal/thermal_zone0/temp, /sys/class/thermal/thermal_zone1/temp,
+# /sys/class/thermal/thermal_zone2/temp, /sys/class/thermal/thermal_zone3/temp 
+# and /sys/class/thermal/thermal_zone4/temp.
+# File like object to be used for displaying CPU temperature. String, default 
+# /sys/class/thermal/thermal_zone0/temp.
+cpu_temp_location = '/sys/class/thermal/thermal_zone0/temp'
+
+# The CPU temperature display colour can be changed depending on temperature. 
+# Three temperature bands are supported and these are defined by cpu_temp1 and
+# cpu_temp2. CPU temperatures below cpu_temp1 are displayed in the colour set 
+# by cpu_temp_normal, CPU temperatures >= cpu_temp1 and <cpu_temp2 are 
+# displayed in the colour set by cpu_temp_colour1. CPU temperatures >=cpu_temp2 
+# are displayed in the colour set by cpu_temp_colour2.
+
+# Colour used for CPU temperature < cpu_temp1. String, default is light green.
+cpu_temp_colour_normal = light green
+
+# Temperature in C above which CPU temperature is displayed using cpu_temp_colour1. 
+# Number, default 80.
+cpu_temp1 = 80
+
+# Colour used for CPU temperature >= cpu_temp1 and < cpu_temp2. String, default 
+# is light yellow.
+cpu_temp_colour1 = light yellow
+
+# Temperature in C above which CPU temperature is displayed using cpu_temp_colour2.
+# Number, default 90.
+cpu_tempe2 = 90
+
+# Colour used for CPU temperature >= cpu_temp2. String, default is light red.
+cpu_temp_colour2 = light red
+
+
+#
+# Mounted hard disk display settings
+#
+
+# Mask to use for displaying mounted disk information. Only mounted disks that 
+# begin with hdd_type will be displayed. String, default /dev/sd.
+hdd_type = '/dev/sd'
+
+# The hard disk usage display colour can be changed depending on the percentage
+# level of disk usage. Three bands are supported and these are defined by 
+# hdd_usage1 and hdd_usage2. Disk usage below hdd_usage1 are displayed in the 
+# colour set by hdd_usage_colour_normal, hard disk usage >= hdd_usage1 and 
+# < hdd_usage2 are displayed in the colour set by hdd_usage_colour1. Hard disk 
+# usage >= hdd_usage2 is displayed in the colour set by hdd_usage_colour2.
+
+# Colour used for hard disk usage < hdd_usage1. String, default is light green.
+hdd_usage_colour_normal = light green
+
+# Hard disk usage in % above which hard disk usage is displayed using 
+# hdd_usage_colour1. Number, default 75.
+hdd_usage1 = 75
+
+# Colour used for hard disk usage >= hdd_usage1 and < hdd_usage2. String, default
+# is light yellow.
+hdd_usage_colour1 = light yellow
+
+# Hard disk usage in % above which hard disk usage is displayed using 
+# hdd_usage_colour2. Number, default 90.
+hdd_usage2 = 90
+
+# Colour used for hard disk usage >= hdd_usage2. String, default is light red.
+hdd_usage_colour2 = light red
+
+
+Known Issues
+
+    -   use of update periods less than 2 seconds sometimes results in flashing
+        of the bottom few (pixel) lines of the display.
+"""
+from __future__ import with_statement
+
+# python imports
+import datetime
+import os.path
+import platform
+import socket
+import time
+
+from collections import namedtuple
+
+# external imports
+import configobj
+import netifaces
+import psutil
+
+# set some constants
+CONFIG_PATH = '/etc/cloudshell-panel.conf'
+COLOUR_MAP = {'black': '30',
+              'red': '31',
+              'green': '32',
+              'yellow': '33',
+              'blue': '34',
+              'magenta': '35',
+              'cyan': '36',
+              'light gray': '37',
+              'dark gray': '90',
+              'light red': '91',
+              'light green': '92',
+              'light yellow': '93',
+              'light blue': '94',
+              'light magenta': '95',
+              'light cyan': '96',
+              'white': '97'}
+REVERSE = '7'
+ESC = '\x1b'
+RESET = ''.join([ESC, '[0m'])
+CLEAR_SCREEN = ''.join([ESC, 'c'])
+
+##########
+#
+#   Class CloudshellLcd
+#
+##########
+
+
+class CloudshellLcd(object):
+    """Class to handle interaction with a Cloudshell LCD."""
+    
+    def __init__(self):
+        """Initialise the class."""
+        
+        # read cloudshell-panel config if it exists
+        if os.path.isfile(CONFIG_PATH):
+            config_dict = configobj.ConfigObj(CONFIG_PATH, file_error=True)
+        else:
+            config_dict = {}
+        
+        # now set some parameters based on the config settings, if they are not 
+        # available then use sane defaults
+        
+        # device used to write to display, default is /dev/tty1
+        self.device = config_dict.get('device', '/dev/tty1')
+        
+        # lcd label colour, default is white
+        self.label_colour = config_dict.get('label_colour', 'white')
+        # lcd data colour, default is cyan
+        self.data_colour = config_dict.get('data_colour', 'cyan')
+        
+        # cpu temperature
+        # cpu temperature 'location'
+        self.cpu_temp_location = config_dict.get('cpu_temp_location', 
+                                                 '/sys/class/thermal/thermal_zone0/temp')
+        # cpu temperature normal colour
+        self.cpu_temp_colour_normal = config_dict.get('cpu_temp_colour_normal', 
+                                                      'light green')
+        # cpu temperature1 colour
+        self.cpu_temp_colour1 = config_dict.get('cpu_temp_colour1', 
+                                                'light yellow')
+        # cpu temperature2 colour
+        self.cpu_temp_colour2 = config_dict.get('cpu_temp_colour2', 
+                                                'light red')
+        # cpu temperature1
+        self.cpu_temp1 = int(config_dict.get('cpu_temp1', 80))
+        # cpu temperature2
+        self.cpu_temp2 = int(config_dict.get('cpu_temp2', 90))
+
+        # hdd usage
+        # hdd mask
+        self.hdd_mask = config_dict.get('hdd_type', '/dev/sd')
+        # hdd usage normal colour
+        self.hdd_usage_colour_normal = config_dict.get('hdd_usage_colour_normal', 
+                                                       'light green')
+        # hdd usage1 colour
+        self.hdd_usage_colour1 = config_dict.get('hdd_usage_colour1', 
+                                                 'light yellow')
+        # hdd usage2 colour
+        self.hdd_usage_colour2 = config_dict.get('hdd_usage_colour2', 
+                                                 'light red')
+        # hdd usage1
+        self.hdd_usage1 = int(config_dict.get('hdd_usage1', 75))
+        # hdd usage2
+        self.hdd_usage2 = int(config_dict.get('hdd_usage2', 90))
+
+        # date-time display format
+        self.date_time_format = config_dict.get('date_time_format', 
+                                                '%-d %B %Y %H:%M:%S')
+
+        # lcd refresh period
+        self.update_interval = int(config_dict.get('update_interval', 2))
+        
+        # file type object used to write to the LCD
+        self.lcd = None
+    
+    def open_lcd_device(self):
+        """Open a tty device for Cloudshell LCD.
+        
+        Obtain a file type object to be used to write to the LCD.
+        """
+        
+        self.lcd = open(self.device, 'w', 0)
+    
+    def close_lcd_device(self):
+        """Close Cloudshell LCD tty device.
+        
+        If it was opened close the file used to write to the LCD.
+        """
+        
+        if self.lcd is not None:
+            self.lcd.close()
+        
+    def write(self, str, colour='light gray', reverse=False, new_line=False, width=''):
+        """Write a string on the Cloudshell LCD.
+        
+        Write a string to the LCD with limited formatting controls. The display 
+        attributes are reset using ANSI code ESC[0m once the string has been
+        written to the display.
+        
+        Inputs:
+            str:      The string to be written to the LCD. String.
+            colour:   Colour to be used when 'str' is displayed on the LCD. 
+                      String, default is 'light gray'.
+            reverse:  Display 'str' in reverse. Boolean, default is False.
+            new_line: Add a new line ('\n') character to the end of the string 
+                      to be displayed. Boolean, default is False.
+            width:    Sets the display field and justification used to display 
+                      'str'. 'str' is display in a field of 'width' characters. 
+                      If 'width' is negative 'str' is left justified in the 
+                      field, otherwise 'str' is right justified within the 
+                      field.
+        """
+        
+        # if the displayed has been 'opened' and there is data to write
+        if self.lcd is not None and str is not None:
+            # build a list of to be used to display the data
+            _attr_list = [REVERSE] if reverse else []
+            if colour in COLOUR_MAP:
+                _attr_list.append(COLOUR_MAP[colour])
+            # if there are any display attributes then write them to the 
+            # display first
+            if len(_attr_list) > 0:
+                self.lcd.write(''.join([ESC, '[', ';'.join(_attr_list), 'm']))
+            # obtain the format string to be used to format the data
+            _format_str = '%s' if width == '' else '%%%s.%ss' % (width, abs(width))
+            # format the data to be displayed based on the width parameter
+            _str = ''.join([_format_str % str, '\n']) if new_line else _format_str % str
+            # write the data to the screen
+            self.lcd.write(_str)
+            # send an ANSI reset escape code
+            self.lcd.write(RESET)
+    
+    def clear_screen(self):
+        """Clear the LCD.
+        
+        Write the ANSI escape code ESC c to clear the screen."""
+        
+        self.lcd.write(CLEAR_SCREEN)
+        
+##########
+#
+#   Utility functions
+#
+##########
+
+
+def get_os():
+    """Get host operating system info.
+    
+    Determine the Linux OS distribution name. 
+    Refer https://docs.python.org/2/library/platform.html#unix-platforms
+    
+    Returns:
+        A 3-way tuple (distname, version, id)
+    """
+    
+    return platform.linux_distribution()
+
+
+def get_kernel():
+    """Get host kernel version.
+    
+    Obtain uname info from platform and manipulates the 'release' element of 
+    the uname tuple to obtain the kernel version number.
+    Refer https://docs.python.org/2/library/platform.html#cross-platform
+    
+    Returns:
+        String containing the kernel version number.
+    """
+    
+    return platform.uname()[2].split('-', 1)[0]
+
+
+def get_host_name():
+    """Get the host name.
+    
+    Returns:
+        String containing the hostname.
+    """
+    
+    return socket.gethostname()
+
+
+def get_ip():
+    """Get the ip address.
+    
+    Obtains the AF_INET address for the designated interface using the 
+    netifaces module.
+    
+    Returns:
+        String containing IP4 address of the designated network interface.
+    """
+    
+    return netifaces.ifaddresses('eth0')[2][0]['addr']
+
+
+def get_cpu_usage():
+    """Get CPU usage in percent.
+    
+    Uses module psutil to obtain the current system-wide CPU utilization as a 
+    percentage. Note, when first called psutil.cpu_percent() will return 0.0.
+    
+    Returns:
+        String containing the current system-wide CPU utilization as a 
+        percentage.
+    """
+    
+    return str(psutil.cpu_percent())
+
+
+def get_cpu_temp(location):
+    """Get CPU temperature.
+    
+    Obtains the CPU temperature from file 
+    /sys/class/thermal/thermal_zone0/temp.
+    
+    Returns:
+        Number containing the current CPU temperature in degrees C.
+    """
+    
+    def cat(file): return open(file, 'r').read().strip()
+    return int(cat(location))/1000
+
+
+def get_system_uptime():
+    """Get system uptime in seconds.
+    
+    Calculates the number of elapsed seconds since the system was booted.
+    
+    Returns:
+        Number of elapsed seconds since the system was booted.
+    """
+    
+    return time.time() - psutil.boot_time()
+
+
+def get_hdd_info(hdd_type='/dev/sd'):
+    """Get information on mounted hard disks.
+    
+    Obtains mountpoint and disk usage information for each mounted partition 
+    that matches the template device name 'hdd_type'. Disk usage information is
+    provided as a human readable string of up to 4 characters in length with an
+    identify unit letter and 0 or 1 decimal place.
+    
+    Returns:
+        List of 6-way named tuples, 1 tuple per partition. Tuple fields are 
+            - 'device'. Device name.
+            - 'mountpoint'. Device mountpoint.
+            - 'total'. Partition size.
+            - 'used'. Partition usage.
+            - 'free'. Partition space free.
+            - 'percent'. Percentage of partition space free.
+        The 'percent' field is numeric and all other fields are strings.
+        Disk usage/free information is provided as a human readable string of 
+        up to 4 characters in length with an identifying unit letter and 0 or 
+        1 decimal places; eg 1.0G, 10T, 237M.
+    """
+    
+    # first get a list of named tuples with our partitions
+    _partitions = psutil.disk_partitions()
+    # but we only want hard disks that start with sd
+    _sd_partitions = [a for a in _partitions if a.device.startswith(hdd_type)]
+    use = namedtuple('Drive', 
+                     ['device', 'mountpoint', 'total', 'used', 'free', 'percent'])
+    _info = []
+    for _part in _sd_partitions:
+        _usage = psutil.disk_usage(_part.mountpoint)
+        _info.append(use(_part.device, _part.mountpoint,
+                         bytes2human(_usage.total), bytes2human(_usage.used), 
+                         bytes2human(_usage.free), _usage.percent))
+    return _info
+        
+    
+def format_elapsed_seconds(elapsed):
+    """Format elapsed seconds to a human readable string.
+    
+    Returns a string of the form xdays yhours zminutes representing the number 
+    of elapsed seconds. If x or y is 0 then that term is omitted.
+    
+    >>> format_elapsed_seconds(2)
+    0m
+    >>> format_elapsed_seconds(3678)
+    1h 1m
+    >>> format_elapsed_seconds(609389)
+    7d 1h 16m
+    """
+    
+    _sec = int(elapsed)
+    days, _sec = divmod(_sec, 86400)
+    hours, _sec = divmod(_sec, 3600)
+    minutes, _sec = divmod(_sec, 60)
+    if days > 0:
+        return '%dd %dh %dm' % (days, hours, minutes)
+    elif hours > 0:
+        return '%dh %dm' % (hours, minutes)
+    elif minutes > 0:
+        return '%dm' % minutes
+    else:
+        return '0m'
+
+
+def bytes2human(n):
+    """Format a number of bytes into a short, human readable string.
+    
+    'n' is interpreted as a binary (rather than decimal) number of bytes and 
+    converted into a short string of 3 or 4 characters including a trailing 
+    unit letter. 
+    
+    Based upon http://code.activestate.com/recipes/578019
+        Author: Giampaolo Rodola' <g.rodola [AT] gmail [DOT] com>
+        License: MIT
+    
+    >>> bytes2human(10000)
+    9.8K
+    >>> bytes2human(100001221)
+    95M
+    
+    """
+    
+    symbols = ('K', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y')
+    prefix = {}
+    for i, s in enumerate(symbols):
+        prefix[s] = 1 << (i + 1) * 10
+    for s in reversed(symbols):
+        if n >= prefix[s]:
+            value = float(n) / prefix[s]
+            if value <= 10.0:
+                return '%.1f%s' % (value, s)
+            else:
+                return '%.0f%s' % (value, s)
+    return "%sB" % n
+
+##########
+#
+#   Main
+#
+##########
+
+
+def main():
+
+    # get a CloudshellLCD object
+    lcd = CloudshellLcd()
+    # open the display for writing
+    lcd.open_lcd_device()
+    old_time = int(time.time())
+    while True:
+        # clear the screen
+        lcd.clear_screen()
+        # display host name 
+        lcd.write('Host: ', lcd.label_colour)
+        lcd.write(get_host_name(), colour=lcd.data_colour, width=-14)
+        # display IP
+        lcd.write('IP: ', lcd.label_colour)
+        lcd.write(get_ip(), lcd.data_colour, new_line=True)
+        # display OS
+        lcd.write('OS: ', lcd.label_colour)
+        lcd.write(' '.join(get_os()).capitalize(), lcd.data_colour, width=-16)
+        # display kernel version
+        lcd.write('Kernel: ', lcd.label_colour)
+        lcd.write(get_kernel(), lcd.data_colour, new_line=True)
+        # display human readable uptime
+        lcd.write('Uptime: ', lcd.label_colour)
+        _uptime_str = format_elapsed_seconds(get_system_uptime())
+        lcd.write(_uptime_str, lcd.data_colour, new_line=True)
+        # display CPU usage
+        lcd.write('CPU Usage: ', lcd.label_colour)
+        lcd.write(get_cpu_usage() + '%', lcd.data_colour, width=-9)
+        # display CPU temperature; colour coded green, light yellow and light 
+        # red based upon user defined temperature intervals
+        lcd.write('CPU Temp: ', lcd.label_colour)
+        cpu_temp = get_cpu_temp(lcd.cpu_temp_location)
+        if cpu_temp > lcd.cpu_temp2:
+            cpu_temp_colour = 'light red'
+        elif cpu_temp > lcd.cpu_temp1:
+            cpu_temp_colour = 'light yellow'
+        else:
+            cpu_temp_colour = 'light green'
+        lcd.write(''.join((str(cpu_temp), 'C')), cpu_temp_colour, new_line=True)
+        lcd.write('', new_line=True)
+        # get hard disk info
+        hdd_info = get_hdd_info(lcd.hdd_mask)
+        hdd_count = 0
+        # iterate over mounted hard disk partitions
+        for hdd in hdd_info:
+            # set colour to be used for disk usage percent and disk free 
+            # values; colour coded green, light yellow and light red based upon 
+            # user defined intervals for percent used
+            if hdd.percent > lcd.hdd_usage2:
+                hdd_colour = 'light red'
+            elif hdd.percent > lcd.hdd_usage1:
+                hdd_colour = 'light yellow'
+            else:
+                hdd_colour = 'light green'
+            # disk concerned and mountpoint
+            lcd.write('Disk: ', lcd.label_colour)
+            disk_str = ''.join([hdd.device, ' (', hdd.mountpoint, ')'])
+            lcd.write(disk_str, lcd.data_colour, width=-33, new_line=True)
+            # usage
+            lcd.write('Usage: ', lcd.label_colour)
+            lcd.write(''.join([hdd.used, '/', hdd.total]), lcd.data_colour, 
+                      width=-10)
+            usage_str = ''.join(['(', str(hdd.percent), '%)'])
+            lcd.write(usage_str, hdd_colour, width=-9)
+            # free space
+            lcd.write(' Free: ', lcd.label_colour)
+            lcd.write(hdd.free, hdd_colour, new_line=True)
+            hdd_count += 1
+            # only have room for 3 hdd, so if we have processed 3 then break
+            if hdd_count >= 3:
+                break
+        lcd.write('', new_line=True)
+        _date_time_str = datetime.datetime.fromtimestamp(time.time()).strftime(lcd.date_time_format)
+        _length = len(_date_time_str)
+        lcd.write(_date_time_str, width=_length + ((39 - _length) // 2))
+        while int(time.time()) <= old_time + lcd.update_interval - 1:
+            time.sleep(0.2)
+        old_time = int(time.time())
+    # if we get here we are done and we should close the display
+    lcd.close_lcd_device()
+        
+    
+if __name__ == "__main__":
+    main()
