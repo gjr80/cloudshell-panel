@@ -72,6 +72,20 @@ data_colour = cyan
 
 
 #
+# Network interface settings
+#
+
+# As of Debian Stretch the old network names like eth0, eth1 have been
+# deprecated as the device name can change. Clean Debian Stretch installs have
+# implemented predictable interface names such as enp6s0, enp8s0,
+# enx001e0630760c etc. Previously cloudshell-panel displayed the IP address of
+# the eth0 interface, this approach will no longer work so the interface name
+# used by cloudshell-panel to display the IP address can now be specified using
+# the network_interface_name config option.
+network_interface_name = enx001e0630760c
+
+
+#
 # CPU temperature display settings.
 #
 
@@ -232,6 +246,9 @@ class CloudshellLcd(object):
         # lcd data colour, default is cyan
         self.data_colour = config_dict.get('data_colour', 'cyan')
 
+        # network interface name
+        self.network_interface_name = config_dict.get('network_interface_name')
+
         # cpu temperature
         # cpu temperature 'location'
         self.cpu_temp_location = config_dict.get('cpu_temp_location',
@@ -343,6 +360,61 @@ class CloudshellLcd(object):
 
         self.lcd.write(CLEAR_SCREEN)
 
+    def display_header(self):
+        """Display the page header.
+
+        Gather and display the page header."""
+
+        # display host name
+        self.write('Host: ', self.label_colour)
+        self.write(get_host_name(), colour=self.data_colour, width=-14)
+        # display IP
+        self.write('IP: ', self.label_colour)
+        self.write(get_ip(self.network_interface_name), self.data_colour, new_line=True)
+        # display OS
+        self.write('OS: ', self.label_colour)
+        self.write(' '.join(get_os()).capitalize(), self.data_colour,
+                       width=-16)
+        # display kernel version
+        self.write('Kernel: ', self.label_colour)
+        self.write(get_kernel(), self.data_colour, new_line=True)
+        # display human readable uptime
+        self.write('Uptime: ', self.label_colour)
+        _uptime_str = format_elapsed_seconds(get_system_uptime())
+        self.write(_uptime_str, self.data_colour, new_line=True)
+        # display CPU usage
+        self.write('CPU Usage: ', self.label_colour)
+        self.write(get_cpu_usage() + '%', self.data_colour, width=-9)
+        # display CPU temperature; colour coded green, light yellow and light
+        # red based upon user defined temperature intervals
+        self.write('CPU Temp: ', self.label_colour)
+        cpu_temp = get_cpu_temp(self.cpu_temp_location)
+        if cpu_temp > self.cpu_temp2:
+            cpu_temp_colour = 'light red'
+        elif cpu_temp > self.cpu_temp1:
+            cpu_temp_colour = 'light yellow'
+        else:
+            cpu_temp_colour = 'light green'
+        self.write(''.join((str(cpu_temp), 'C')), cpu_temp_colour,
+                       new_line=True)
+        self.write('', new_line=True)
+
+    def display_hdd(self):
+        """Display the page header.
+
+        Gather and display the page header."""
+
+    def display_date_time(self):
+        """Display current date and time.
+
+        Displays current system data and time centred on a single line."""
+
+        _date_time_str = datetime.datetime.fromtimestamp(time.time()).strftime(self.date_time_format)
+        _length = len(_date_time_str)
+        self.write(_date_time_str, width=_length + ((39 - _length) // 2))
+
+
+
 ##########
 #
 #   Utility functions
@@ -387,17 +459,22 @@ def get_host_name():
     return socket.gethostname()
 
 
-def get_ip():
-    """Get the ip address.
+def get_ip(interface_name=None):
+    """Get the ip address of a given network interface.
 
-    Obtains the AF_INET address for the designated interface using the
-    netifaces module.
+    Obtains the AF_INET address for the first address of the designated network
+    interface using the netifaces module. If no interface name is given or it is
+    None then an empty string is returned.
 
     Returns:
-        String containing IP4 address of the designated network interface.
+        String containing the first AF_INET address of the designated network
+        interface.
     """
 
-    return netifaces.ifaddresses('eth0')[2][0]['addr']
+    if interface_name is not None:
+        return netifaces.ifaddresses(interface_name)[netifaces.AF_INET][0]['addr']
+    else:
+        return ''
 
 
 def get_cpu_usage():
@@ -583,39 +660,11 @@ def main():
     lcd.open_lcd_device()
     old_time = int(time.time())
     while True:
+###    for a in range (10):
         # clear the screen
         lcd.clear_screen()
-        # display host name
-        lcd.write('Host: ', lcd.label_colour)
-        lcd.write(get_host_name(), colour=lcd.data_colour, width=-14)
-        # display IP
-        lcd.write('IP: ', lcd.label_colour)
-        lcd.write(get_ip(), lcd.data_colour, new_line=True)
-        # display OS
-        lcd.write('OS: ', lcd.label_colour)
-        lcd.write(' '.join(get_os()).capitalize(), lcd.data_colour, width=-16)
-        # display kernel version
-        lcd.write('Kernel: ', lcd.label_colour)
-        lcd.write(get_kernel(), lcd.data_colour, new_line=True)
-        # display human readable uptime
-        lcd.write('Uptime: ', lcd.label_colour)
-        _uptime_str = format_elapsed_seconds(get_system_uptime())
-        lcd.write(_uptime_str, lcd.data_colour, new_line=True)
-        # display CPU usage
-        lcd.write('CPU Usage: ', lcd.label_colour)
-        lcd.write(get_cpu_usage() + '%', lcd.data_colour, width=-9)
-        # display CPU temperature; colour coded green, light yellow and light
-        # red based upon user defined temperature intervals
-        lcd.write('CPU Temp: ', lcd.label_colour)
-        cpu_temp = get_cpu_temp(lcd.cpu_temp_location)
-        if cpu_temp > lcd.cpu_temp2:
-            cpu_temp_colour = 'light red'
-        elif cpu_temp > lcd.cpu_temp1:
-            cpu_temp_colour = 'light yellow'
-        else:
-            cpu_temp_colour = 'light green'
-        lcd.write(''.join((str(cpu_temp), 'C')), cpu_temp_colour, new_line=True)
-        lcd.write('', new_line=True)
+        # display the header info
+        lcd.display_header()
         # get hard disk info
         hdd_info = get_hdd_info(lcd.hdd_display)
         hdd_count = 0
@@ -648,9 +697,8 @@ def main():
             if hdd_count >= 3:
                 break
         lcd.write('', new_line=True)
-        _date_time_str = datetime.datetime.fromtimestamp(time.time()).strftime(lcd.date_time_format)
-        _length = len(_date_time_str)
-        lcd.write(_date_time_str, width=_length + ((39 - _length) // 2))
+        # display the data-time
+        lcd.display_date_time()
         while int(time.time()) <= old_time + lcd.update_interval - 1:
             time.sleep(0.2)
         old_time = int(time.time())
