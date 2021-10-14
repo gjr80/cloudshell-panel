@@ -1,22 +1,19 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 #
 """Manipulate the Cloudshell2 LCD.
 
-A Python 2.6+ based script to display selected system details on a Cloudshell2
-LCD.
+A Python 3 based script to display selected system details on a Cloudshell2 LCD.
 
 Inspired by the Odroid XU4 cloudshell-lcd script by Kyle Lee
-http://bazaar.launchpad.net/~kyle1117/+junk/cloudshell-lcd/view/head:/bin/cloudshell-lcd
-
+https://bazaar.launchpad.net/~kyle1117/+junk/cloudshell-lcd/view/head:/bin/cloudshell-lcd
 
 Compatibility
 
-    This script works on the Cloudshell2 LCD and requires Python 2.6 or later.
-    It has not been tested under Python 3.
+    This script works on the Cloudshell2 LCD and requires Python 3 or later.
 
-    Development and testing was conducted using Armbian 5.27 Odroid XU4 Debian
-    Jessie (8.8) image using the mainline kernel (4.9.13).
+    Development and testing was conducted using Armbian ?.?? Odroid XU4 Debian
+    Bullseye (11.1) image using the mainline kernel (?.?.?).
 
 
 Design
@@ -32,9 +29,9 @@ Design
 Pre-requisites
 
     The following additional python packages are required:
-        -   configobj (python-configobj)
-        -   netifaces (python-netifaces)
-        -   psutil (python-psutil)
+        -   configobj (python3-configobj)
+        -   netifaces (python3-netifaces)
+        -   psutil (python3-psutil)
 
 
 Configuration
@@ -181,6 +178,7 @@ from __future__ import with_statement
 
 # python imports
 import datetime
+import distro
 import os.path
 import platform
 import socket
@@ -192,6 +190,9 @@ from collections import namedtuple
 import configobj
 import netifaces
 import psutil
+
+# script version number
+CSP_VER = "0.2.0"
 
 # set some constants
 CONFIG_PATH = '/etc/cloudshell-panel.conf'
@@ -216,12 +217,10 @@ ESC = '\x1b'
 RESET = ''.join([ESC, '[0m'])
 CLEAR_SCREEN = ''.join([ESC, 'c'])
 
-##########
-#
-#   Class CloudshellLcd
-#
-##########
 
+# ============================================================================
+#                            class CloudshellLcd
+# ============================================================================
 
 class CloudshellLcd(object):
     """Class to handle interaction with a Cloudshell LCD."""
@@ -240,15 +239,12 @@ class CloudshellLcd(object):
 
         # device used to write to display, default is /dev/tty1
         self.device = config_dict.get('device', '/dev/tty1')
-
         # lcd label colour, default is white
         self.label_colour = config_dict.get('label_colour', 'white')
         # lcd data colour, default is cyan
         self.data_colour = config_dict.get('data_colour', 'cyan')
-
         # network interface name
         self.network_interface_name = config_dict.get('network_interface_name')
-
         # cpu temperature
         # cpu temperature 'location'
         self.cpu_temp_location = config_dict.get('cpu_temp_location',
@@ -266,12 +262,10 @@ class CloudshellLcd(object):
         self.cpu_temp1 = int(config_dict.get('cpu_temp1', 80))
         # cpu temperature2
         self.cpu_temp2 = int(config_dict.get('cpu_temp2', 90))
-
         # hdd usage
         # hdd display - a list of device names to match for mounted partitions
         self.hdd_display = option_as_list(config_dict.get('hdd_display', None))
         self.hdd_display = None if self.hdd_display == [''] else self.hdd_display
-
         # hdd usage normal colour
         self.hdd_usage_colour_normal = config_dict.get('hdd_usage_colour_normal',
                                                        'light green')
@@ -285,14 +279,11 @@ class CloudshellLcd(object):
         self.hdd_usage1 = int(config_dict.get('hdd_usage1', 75))
         # hdd usage2
         self.hdd_usage2 = int(config_dict.get('hdd_usage2', 90))
-
         # date-time display format
         self.date_time_format = config_dict.get('date_time_format',
                                                 '%-d %B %Y %H:%M:%S')
-
         # lcd refresh period
         self.update_interval = int(config_dict.get('update_interval', 2))
-
         # file type object used to write to the LCD
         self.lcd = None
 
@@ -302,7 +293,8 @@ class CloudshellLcd(object):
         Obtain a file type object to be used to write to the LCD.
         """
 
-        self.lcd = open(self.device, 'w', 0)
+        self.lcd = open(self.device, 'w')
+        # self.lcd = open(self.device, 'w', 0)
 
     def close_lcd_device(self):
         """Close Cloudshell LCD tty device.
@@ -313,7 +305,8 @@ class CloudshellLcd(object):
         if self.lcd is not None:
             self.lcd.close()
 
-    def write(self, str, colour='light gray', reverse=False, new_line=False, width=''):
+    def write(self, string, colour='light gray', reverse=False,
+              new_line=False, width=''):
         """Write a string on the Cloudshell LCD.
 
         Write a string to the LCD with limited formatting controls. The display
@@ -328,14 +321,14 @@ class CloudshellLcd(object):
             new_line: Add a new line ('\n') character to the end of the string
                       to be displayed. Boolean, default is False.
             width:    Sets the display field and justification used to display
-                      'str'. 'str' is display in a field of 'width' characters.
-                      If 'width' is negative 'str' is left justified in the
-                      field, otherwise 'str' is right justified within the
-                      field.
+                      'string'. 'string' is displayed in a field of 'width'
+                      characters. If 'width' is negative 'str' is left
+                      justified in the field, otherwise 'str' is right
+                      justified within the field.
         """
 
         # if the displayed has been 'opened' and there is data to write
-        if self.lcd is not None and str is not None:
+        if self.lcd is not None and string is not None:
             # build a list of to be used to display the data
             _attr_list = [REVERSE] if reverse else []
             if colour in COLOUR_MAP:
@@ -347,7 +340,7 @@ class CloudshellLcd(object):
             # obtain the format string to be used to format the data
             _format_str = '%s' if width == '' else '%%%s.%ss' % (width, abs(width))
             # format the data to be displayed based on the width parameter
-            _str = ''.join([_format_str % str, '\n']) if new_line else _format_str % str
+            _str = ''.join([_format_str % string, '\n']) if new_line else _format_str % string
             # write the data to the screen
             self.lcd.write(_str)
             # send an ANSI reset escape code
@@ -373,11 +366,10 @@ class CloudshellLcd(object):
         self.write(get_ip(self.network_interface_name), self.data_colour, new_line=True)
         # display OS
         self.write('OS: ', self.label_colour)
-        self.write(' '.join(get_os()).capitalize(), self.data_colour,
-                       width=-16)
+        self.write(' '.join(get_os()).capitalize(), self.data_colour, new_line=True)
         # display kernel version
         self.write('Kernel: ', self.label_colour)
-        self.write(get_kernel(), self.data_colour, new_line=True)
+        self.write(get_kernel(), self.data_colour, width=-12)
         # display human readable uptime
         self.write('Uptime: ', self.label_colour)
         _uptime_str = format_elapsed_seconds(get_system_uptime())
@@ -395,8 +387,7 @@ class CloudshellLcd(object):
             cpu_temp_colour = 'light yellow'
         else:
             cpu_temp_colour = 'light green'
-        self.write(''.join((str(cpu_temp), 'C')), cpu_temp_colour,
-                       new_line=True)
+        self.write(''.join((str(cpu_temp), 'C')), cpu_temp_colour, new_line=True)
         self.write('', new_line=True)
 
     def display_hdd(self):
@@ -404,35 +395,37 @@ class CloudshellLcd(object):
 
         Gather and display the page header."""
 
-    def display_date_time(self):
+        pass
+
+    def display_date_time(self, new_line=False):
         """Display current date and time.
 
-        Displays current system data and time centred on a single line."""
+        Displays current system data and time centred on a single line.
+        Optionally includes a new line at the end of the line.
+        """
 
         _date_time_str = datetime.datetime.fromtimestamp(time.time()).strftime(self.date_time_format)
         _length = len(_date_time_str)
-        self.write(_date_time_str, width=_length + ((39 - _length) // 2))
+        self.write(_date_time_str, width=_length + ((39 - _length) // 2), new_line=new_line)
 
 
-
-##########
-#
-#   Utility functions
-#
-##########
-
+# ============================================================================
+#                             Utility Functions
+# ============================================================================
 
 def get_os():
     """Get host operating system info.
 
     Determine the Linux OS distribution name.
-    Refer https://docs.python.org/2/library/platform.html#unix-platforms
+    Refer https://distro.readthedocs.io/en/latest/
+
+    Minor formatting of codename to enclose in brackets.
 
     Returns:
-        A 3-way tuple (distname, version, id)
+        A 3-way tuple (distribution name, version, codename)
     """
 
-    return platform.linux_distribution()
+    return distro.id(), distro.version(), "(%s)" % distro.codename()
 
 
 def get_kernel():
@@ -520,7 +513,7 @@ def get_system_uptime():
 def get_hdd_info(hdd_display=None):
     """Get information on mounted hard disks.
 
-    Obtains mountpoint and disk usage information for each mounted partition
+    Obtains mount point and disk usage information for each mounted partition
     that matches the template device names in 'hdd_display'. Disk usage
     information is provided as a human readable string of up to 4 characters in
     length with an identify unit letter and 0 or 1 decimal place.
@@ -531,7 +524,7 @@ def get_hdd_info(hdd_display=None):
     Returns:
         List of 6-way named tuples, 1 tuple per partition. Tuple fields are
             - 'device'. Device name.
-            - 'mountpoint'. Device mountpoint.
+            - 'mountpoint'. Device mount point.
             - 'total'. Partition size.
             - 'used'. Partition usage.
             - 'free'. Partition space free.
@@ -564,8 +557,7 @@ def get_hdd_info(hdd_display=None):
                 # non-wild card search so add precise matches only
                 _parts |= {a for a in _partitions if a.device == _match}
         # create a named tuple for our results
-        use = namedtuple('Drive',
-                         ['device', 'mountpoint', 'total', 'used', 'free', 'percent'])
+        use = namedtuple('Drive', ['device', 'mountpoint', 'total', 'used', 'free', 'percent'])
         # initialise our result list
         _info = []
         # iterate over the mounted partitions we are interested in and create a
@@ -613,7 +605,7 @@ def bytes2human(n):
     converted into a short string of 3 or 4 characters including a trailing
     unit letter.
 
-    Based upon http://code.activestate.com/recipes/578019
+    Based upon https://code.activestate.com/recipes/578019
         Author: Giampaolo Rodola' <g.rodola [AT] gmail [DOT] com>
         License: MIT
 
@@ -639,18 +631,16 @@ def bytes2human(n):
 
 
 def option_as_list(option):
-    if option is None: return None
-    if hasattr(option, '__iter__'):
+
+    if option is None or hasattr(option, '__iter__'):
         return option
-    return [option]
+    else:
+        return [option]
 
 
-##########
-#
-#   Main
-#
-##########
-
+# ============================================================================
+#                                    Main
+# ============================================================================
 
 def main():
 
@@ -658,11 +648,13 @@ def main():
     lcd = CloudshellLcd()
     # open the display for writing
     lcd.open_lcd_device()
+    # get the current time
     old_time = int(time.time())
     while True:
-###    for a in range (10):
         # clear the screen
         lcd.clear_screen()
+        # write the date and time to the screen
+        lcd.display_date_time(new_line=True)
         # display the header info
         lcd.display_header()
         # get hard disk info
@@ -679,7 +671,7 @@ def main():
                 hdd_colour = 'light yellow'
             else:
                 hdd_colour = 'light green'
-            # disk concerned and mountpoint
+            # disk concerned and mount point
             lcd.write('Disk: ', lcd.label_colour)
             disk_str = ''.join([hdd.device, ' (', hdd.mountpoint, ')'])
             lcd.write(disk_str, lcd.data_colour, width=-33, new_line=True)
@@ -696,9 +688,6 @@ def main():
             # only have room for 3 hdd, so if we have processed 3 then break
             if hdd_count >= 3:
                 break
-        lcd.write('', new_line=True)
-        # display the data-time
-        lcd.display_date_time()
         while int(time.time()) <= old_time + lcd.update_interval - 1:
             time.sleep(0.2)
         old_time = int(time.time())
